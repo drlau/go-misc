@@ -34,11 +34,13 @@ var usage = `Usage: github-close-pr [options...] OWNER REPO NUMBER
 Options:
   -close-comment string  Close comment
   -delete-branch bool    Delete the branch associated with the PR
+  -strict        bool    Fail if the PR is not open
 `
 
 var (
 	closeCommentFlag = flag.String("close-comment", "", "")
 	deleteBranchFlag = flag.Bool("delete-branch", false, "")
+	strictFlag = flag.Bool("strict", false, "")
 )
 
 func main() {
@@ -64,6 +66,7 @@ func main() {
 
 	closeComment := *closeCommentFlag
 	deleteBranch := *deleteBranchFlag
+	strict := *strictFlag
 
 	prNumber, err := strconv.Atoi(number)
 	if err != nil || prNumber <= 0 {
@@ -82,7 +85,11 @@ func main() {
 	}
 
 	if pr.GetState() != "open" {
-		log.Fatalf("[ERROR] PR %d is not open\n", prNumber)
+		if strict {
+			log.Fatalf("[ERROR] PR %d is not open - not attempting any action\n", prNumber)
+		}
+		log.Printf("[WARN] PR %d is not open - not attempting any action\n", prNumber)
+		return
 	}
 
 	if closeComment != "" {
