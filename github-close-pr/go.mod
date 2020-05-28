@@ -1,4 +1,4 @@
-module github-close-pr
+module github.com/drlau/go-misc/github-close-pr
 
 go 1.14
 
