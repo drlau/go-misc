@@ -23,7 +23,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/google/go-github/v31/github"
+	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
 )
 
@@ -43,13 +43,31 @@ var (
 	strictFlag = flag.Bool("strict", false, "")
 )
 
+type PullRequest struct {
+	ID          string
+	Number      int
+	Title       string
+	State       string
+
+	BaseRepository struct {
+		ID string
+		Name string
+	}
+	HeadRef struct {
+		ID string
+		Name string
+	}
+	HeadRepository struct {
+		ID string
+		Name string
+	}
+}
+
 func main() {
 	token := os.Getenv(EnvToken)
 	if len(token) == 0 {
 		log.Fatal("[ERROR] Environment variable GITHUB_TOKEN must be set")
 	}
-
-	ctx := context.Background()
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, usage)
@@ -77,14 +95,14 @@ func main() {
 		AccessToken: token,
 	})
 	tc := oauth2.NewClient(oauth2.NoContext, ts)
-	client := github.NewClient(tc)
+	v4 := githubv4.NewClient(tc)
 
-	pr, _, err := client.PullRequests.Get(ctx, owner, repo, prNumber)
+	pr, err := getPRIDByNumber(v4, owner, repo, prNumber)
 	if err != nil {
-		log.Fatalf("[ERROR] Failed to get PR %d: %s\n", prNumber, err)
+		log.Fatalf("[ERROR] Failed to get PR ID for PR %d: %s\n", prNumber, err)
 	}
 
-	if pr.GetState() != "open" {
+	if pr.State != "OPEN" {
 		if strict {
 			log.Fatalf("[ERROR] PR %d is not open - not attempting any action\n", prNumber)
 		}
@@ -93,17 +111,13 @@ func main() {
 	}
 
 	if closeComment != "" {
-		comment := &github.IssueComment{
-			Body: github.String(closeComment),
-		}
-		_, _, err := client.Issues.CreateComment(ctx, owner, repo, prNumber, comment)
+		err = commentOnPR(v4, pr.ID, closeComment)
 		if err != nil {
 			log.Fatalf("[ERROR] Failed to comment on PR %d: %s\n", prNumber, err)
 		}
 	}
 
-	pr.State = github.String("closed")
-	_, _, err = client.PullRequests.Edit(ctx, owner, repo, prNumber, pr)
+	err = closePR(v4, pr.ID)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to close PR %d: %s\n", prNumber, err)
 	}
@@ -113,16 +127,87 @@ func main() {
 		return
 	}
 
-	prBranchHead := pr.GetHead()
-	prBranchBase := pr.GetBase()
-	if prBranchHead.GetRepo().GetID() != prBranchBase.GetRepo().GetID() {
-		log.Printf("[WARN] PR head repository %s and base repository %s are different - not attempting to delete PR branch\n", prBranchHead.GetRepo().GetFullName(), prBranchBase.GetRepo().GetFullName())
+	if pr.HeadRepository.ID != pr.BaseRepository.ID {
+		log.Printf("[WARN] PR head repository %s and base repository %s are different - not attempting to delete PR branch\n", pr.HeadRepository.Name, pr.BaseRepository.Name)
 		return
 	}
-	ref := prBranchHead.GetRef()
-	_, err = client.Git.DeleteRef(ctx, owner, repo, fmt.Sprintf("heads/%s", ref))
+	err = deleteRef(v4, pr.HeadRef.ID)
 	if err != nil {
-		log.Fatalf("[ERROR] Failed to delete ref %s: %s\n", ref, err)
+		log.Fatalf("[ERROR] Failed to delete ref %s: %s\n", pr.HeadRef.Name, err)
 	}
-	log.Printf("[INFO] Successfully deleted ref %s\n", ref)
+	log.Printf("[INFO] Successfully deleted ref %s\n", pr.HeadRef.Name)
+}
+
+func getPRIDByNumber(v4 *githubv4.Client, owner, repo string, number int) (*PullRequest, error) {
+	var response struct {
+		Repository struct {
+			PullRequest PullRequest `graphql:"pullRequest(number: $pr_number)"`
+		} `graphql:"repository(owner: $owner, name: $repo)"`
+	}
+
+	variables := map[string]interface{}{
+		"owner":     githubv4.String(owner),
+		"repo":      githubv4.String(repo),
+		"pr_number": githubv4.Int(number),
+	}
+
+	err := v4.Query(context.Background(), &response, variables)
+	if err != nil {
+		return nil, err
+	}
+
+	return &response.Repository.PullRequest, nil
+}
+
+func closePR(v4 *githubv4.Client, id string) error {
+	var mutation struct {
+		ClosePullRequest struct {
+			PullRequest struct {
+				ID githubv4.ID
+			}
+		} `graphql:"closePullRequest(input: $input)"`
+	}
+
+	input := githubv4.ClosePullRequestInput{
+		PullRequestID: id,
+	}
+
+	err := v4.Mutate(context.Background(), &mutation, input, nil)
+
+	return err
+}
+
+func commentOnPR(v4 *githubv4.Client, id, body string) error {
+	var mutation struct {
+		AddComment struct {
+			Subject struct {
+				ID githubv4.ID
+			}
+		} `graphql:"addComment(input: $input)"`
+	}
+
+	input := githubv4.AddCommentInput{
+		SubjectID: id,
+		Body: githubv4.String(body),
+	}
+
+	err := v4.Mutate(context.Background(), &mutation, input, nil)
+
+	return err
+}
+
+func deleteRef(v4 *githubv4.Client, id string) error {
+	var mutation struct {
+		DeleteRef struct{
+			ClientMutationID string
+		} `graphql:"deleteRef(input: $input)"`
+	}
+
+	input := githubv4.DeleteRefInput{
+		RefID: id,
+	}
+
+	err := v4.Mutate(context.Background(), &mutation, input, nil)
+
+	return err
 }
